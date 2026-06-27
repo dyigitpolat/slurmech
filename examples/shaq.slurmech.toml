@@ -1,0 +1,35 @@
+# Example workspace config (copy to project root as .slurmech.toml)
+
+profile = "shaq-xlog1"
+
+[sync]
+include = [
+  "src/**",
+  "legacy/**",
+  "experiments/**",
+  "pyproject.toml",
+  "uv.lock",
+]
+exclude = [
+  "**/__pycache__",
+  ".venv",
+  "vendor/**",
+  "data/**",
+  "*.pt",
+  "*.pth",
+  "tests/**",
+]
+
+[slurm]
+partition = "gpu"
+time = "02:00:00"
+gres = "gpu:h100-47:1"
+mem = "200G"
+cpus_per_gpu = 40
+
+[env]
+mode = "reuse"
+venv = "/home/y/yigit/imagenetshaq/env"
+
+[fetch]
+patterns = ["*.log", "*_model.pth", "CHECKPOINT_*"]
