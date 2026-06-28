@@ -44,6 +44,8 @@ profile = "shaq-xlog1"
 
 Credentials can also come from the project `.env` (same keys as today: `REMOTE_USER`, `REMOTE_HOST`, `REMOTE_DIR`, `REMOTE_PASS`).
 
+If you run `slurmech` from an SSH/GPU server that cannot directly reach the Slurm cluster, configure a proxy or reverse tunnel. See [docs/PROXY.md](docs/PROXY.md).
+
 ## Commands (planned)
 
 | Command | Description |

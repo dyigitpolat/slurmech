@@ -5,7 +5,7 @@
 **slurmech** is a local-first CLI that makes a Slurm cluster feel like an extension of your laptop:
 
 ```bash
-slurmech python train_cifar.py --epochs 20 --lr 1e-6
+slurmech run -- env PYTHONPATH=shaq/src python -m shaq.cli train --config shaq/experiments/cifar10/mart_dq_shaq.yaml
 ```
 
 One command should: detect workspace state → sync code → ensure remote env → submit Slurm job → stream stdout/stderr (and ports) back to the terminal you launched from.
@@ -68,7 +68,7 @@ One command should: detect workspace state → sync code → ensure remote env �
 profile = "shaq-xlog1"
 
 [sync]
-include = ["src/**", "legacy/**", "pyproject.toml", "uv.lock"]
+include = ["src/**", "experiments/**", "pyproject.toml", "uv.lock"]
 exclude = ["**/__pycache__", ".venv", "data/**", "*.pt"]
 
 [slurm]
@@ -90,6 +90,19 @@ python = "3.12"
 2. Project `.env` (`REMOTE_USER`, `REMOTE_HOST`, `REMOTE_DIR`, `REMOTE_PASS`)
 3. Environment variables
 4. SSH key (no password) if configured in `workspace.toml`
+
+### 2.4 Proxy routing
+
+Profiles may add optional proxy fields without changing the public CLI:
+
+```bash
+REMOTE_PROXY_HOST=127.0.0.1
+REMOTE_PROXY_PORT=2222
+# or
+REMOTE_PROXY_COMMAND=ssh -W xlog1:22 gateway-host
+```
+
+`REMOTE_HOST` remains the logical Slurm target. Proxy fields only change how the SSH socket is created. This lets `slurmech` run from a remote SSH/GPU server while using a reverse tunnel from the user's local machine to reach the cluster. See [PROXY.md](PROXY.md).
 
 ---
 
@@ -124,7 +137,7 @@ export SLURMECH_OVERLAY=$REMOTE_DIR/.slurmech/runs/<run_id>/overlay
 export PYTHONPATH="$SLURMECH_OVERLAY:$SLURMECH_BASE:${PYTHONPATH:-}"
 
 # Resolve each file: overlay first, then base
-exec slurmech-remote-wrap python train_cifar.py ...
+exec slurmech-remote-wrap python -m shaq.cli train ...
 ```
 
 `slurmech-remote-wrap` (small bash or Python shim pushed once) resolves paths:
@@ -350,7 +363,7 @@ slurmech/
 
 ### Phase 4 — SHAQ integration
 - [ ] shaq-workspace example configs
-- [ ] Document repro: `slurmech python legacy/train_cifar.py ...`
+- [x] Document repro: `slurmech run -- env PYTHONPATH=shaq/src python -m shaq.cli train ...`
 - [ ] CI smoke test against mock SSH (pytest + paramiko mock)
 
 ---
@@ -364,7 +377,7 @@ shaq-workspace/
 ├── .gitmodules
 ├── shaq/              # submodule — research package
 ├── slurmech/          # submodule — CLI tool
-├── vendor/slurmster/  # submodule — reference only
+├── slurmster/         # submodule — reference only
 ├── .slurmech.toml     # default profile for this workspace
 ├── .env.example
 └── README.md
@@ -374,10 +387,12 @@ Example repro command after Phase 1:
 
 ```bash
 cd shaq-workspace/shaq
-slurmech python legacy/train_cifar.py \
-  --epochs 20 --lr 1e-6 \
-  --enable_shaq 1 --enable_mart 1 --enable_trades 0 \
-  --ortho_mode dq --train_with_random 0 --train_with_fgsm 0
+slurmech run --time 02:00:00 -- \
+  env PYTHONPATH=shaq/src python -m shaq.cli train \
+  --config shaq/experiments/cifar10/mart_dq_shaq.yaml \
+  --epochs 20 \
+  --data-dir /home/y/yigit/data \
+  --checkpoint-in /home/y/yigit/imagenetshaq/epochstep1_100.pt
 ```
 
 ---
@@ -419,7 +434,7 @@ slurmech python legacy/train_cifar.py \
 ## 14. Success criteria for v1
 
 - [ ] `slurmech init` from shaq repo sets up remote base on xlog1
-- [ ] `slurmech python legacy/train_cifar.py ...` reproduces FGSM ~74% / PGD-20 ~38%
+- [x] `slurmech run -- ... python -m shaq.cli train ...` reproduces FGSM ~74% / PGD-20 ~38%
 - [ ] Disconnect + `slurmech attach` resumes log stream
 - [ ] Second run uploads only changed files (<5s sync for single-file edit)
 - [ ] Credentials never appear in logs or Slurm scripts

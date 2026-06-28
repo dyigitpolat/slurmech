@@ -1,0 +1,7 @@
+parallelism: 2
+fail_fast: false
+jobs:
+  - name: a
+    cmd: python -c 'import socket, time; time.sleep(10); print("a", socket.gethostname())'
+  - name: b
+    cmd: python -c 'import socket, time; time.sleep(10); print("b", socket.gethostname())'

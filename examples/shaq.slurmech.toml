@@ -5,14 +5,14 @@ profile = "shaq-xlog1"
 [sync]
 include = [
   "src/**",
-  "legacy/**",
   "experiments/**",
   "pyproject.toml",
   "uv.lock",
 ]
 exclude = [
-  "**/__pycache__",
-  ".venv",
+  "**/__pycache__/**",
+  "**/*.pyc",
+  ".venv/**",
   "vendor/**",
   "data/**",
   "*.pt",
