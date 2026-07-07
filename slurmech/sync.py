@@ -42,12 +42,28 @@ def tracked_files(root: Path) -> list[Path]:
     return [Path(line) for line in result.stdout.splitlines() if line.strip()]
 
 
+def _expand_include_pattern(root: Path, pattern: str) -> list[Path]:
+    """Expand a sync include glob, including recursive ``**`` patterns."""
+    if "**" not in pattern:
+        return [path for path in root.glob(pattern) if path.is_file()]
+
+    prefix, _, rest = pattern.partition("**")
+    search_root = root / prefix.rstrip("/") if prefix else root
+    if not search_root.exists():
+        return []
+
+    if rest.startswith("/"):
+        rest = rest[1:]
+    if rest:
+        return [path for path in search_root.rglob(rest) if path.is_file()]
+    return [path for path in search_root.rglob("*") if path.is_file()]
+
+
 def select_files(config: WorkspaceConfig) -> list[Path]:
     candidates = set(tracked_files(config.root))
     for pattern in config.sync.include:
-        for path in config.root.glob(pattern):
-            if path.is_file():
-                candidates.add(path.relative_to(config.root))
+        for path in _expand_include_pattern(config.root, pattern):
+            candidates.add(path.relative_to(config.root))
 
     selected = []
     for rel_path in candidates:

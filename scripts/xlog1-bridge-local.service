@@ -1,0 +1,18 @@
+[Unit]
+Description=Persistent reverse SSH tunnel sura:2222 -> xlog1:22
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=GPU_HOST=sura.ddns.comp.nus.edu.sg
+Environment=GPU_USER=yigit
+Environment=CLUSTER_HOST=xlog1
+Environment=TUNNEL_PORT=2222
+Environment=BRIDGE_HOST=sura-xlog1-bridge
+ExecStart=/usr/bin/autossh -M 0 -N -F %h/.ssh/config sura-xlog1-bridge
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

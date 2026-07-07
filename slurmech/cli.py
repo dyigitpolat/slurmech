@@ -14,7 +14,7 @@ from slurmech.credentials import Credentials, load_credentials
 from slurmech.jobs import RemoteLayout, new_run_id, submit_job, submit_pack_job
 from slurmech.pack import PackSpec, load_pack_file
 from slurmech.registry import Registry, RunRecord
-from slurmech.remote import resolve_remote_path, run_state_from_markers
+from slurmech.remote import resolve_remote_path, run_state_from_markers, squeue_state
 from slurmech.ssh import SSHConnection
 from slurmech.stream import stream_stdout_until_done
 from slurmech.sync import (
@@ -289,7 +289,13 @@ def status(
                 if marker_state != "UNKNOWN":
                     state = marker_state
                     registry.update_run(run_id=run.get("run_id"), state=state)
-            if not all_runs and state in {"FINISHED", "FAILED", "CANCELLED"}:
+            job_id = run.get("job_id")
+            if state in {"PENDING", "RUNNING", "SUBMITTED"} and job_id:
+                live_state = squeue_state(conn, str(job_id))
+                if live_state is None:
+                    state = "STALE"
+                    registry.update_run(run_id=run.get("run_id"), state=state)
+            if not all_runs and state in {"FINISHED", "FAILED", "CANCELLED", "STALE"}:
                 continue
             child_summary = _pack_child_summary(conn, run)
             typer.echo(
@@ -535,7 +541,15 @@ def _rewrite_bare_command(argv: list[str]) -> list[str]:
         if token.startswith("-"):
             idx += 1
             continue
-        return ["run", *argv[:idx], "--", *argv[idx:]]
+        # Unknown bare tokens must never silently become remote job
+        # submissions (a typo like `slurmech ls` once submitted `ls` as a
+        # cluster job); remote commands require an explicit `run --`.
+        print(
+            f"slurmech: unknown command {token!r}. "
+            f"To submit a remote command use: slurmech run -- {' '.join(argv[idx:])}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if idx < len(argv):
         return ["run", *argv[: idx - 1], "--", *argv[idx:]]
     return argv

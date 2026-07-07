@@ -68,6 +68,8 @@ def sbatch_directives(slurm: SlurmConfig) -> list[str]:
         directives.append(f"#SBATCH --mem={slurm.mem}")
     if slurm.cpus_per_gpu:
         directives.append(f"#SBATCH --cpus-per-gpu={slurm.cpus_per_gpu}")
+    if slurm.nodes:
+        directives.append(f"#SBATCH --nodes={slurm.nodes}")
     return directives
 
 
@@ -106,7 +108,7 @@ rm -f "$RUN_DIR/.pending"
 mkdir -p "$WORKSPACE"
 cp -al "$BASE"/. "$WORKSPACE"/
 if [ -d "$OVERLAY" ]; then
-  rsync -a "$OVERLAY"/ "$WORKSPACE"/
+  cp -a "$OVERLAY"/. "$WORKSPACE"/
 fi
 
 cd "$WORKSPACE"
@@ -182,7 +184,7 @@ rm -f "$RUN_DIR/.pending"
 mkdir -p "$WORKSPACE" "$RUN_DIR/children"
 cp -al "$BASE"/. "$WORKSPACE"/
 if [ -d "$OVERLAY" ]; then
-  rsync -a "$OVERLAY"/ "$WORKSPACE"/
+  cp -a "$OVERLAY"/. "$WORKSPACE"/
 fi
 
 cd "$WORKSPACE"
@@ -202,11 +204,13 @@ run_child() {{
   local child_dir="$RUN_DIR/children/$name"
   mkdir -p "$child_dir"
   echo "starting $name"
+  set +e
   (
     cd "$WORKSPACE"
     bash -lc "$command"
   ) > "$child_dir/stdout.log" 2> "$child_dir/stderr.log"
   local exit_code=$?
+  set -e
   echo "$exit_code" > "$child_dir/exitcode"
   echo "finished $name exit_code=$exit_code"
   return "$exit_code"

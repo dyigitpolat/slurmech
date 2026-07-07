@@ -45,11 +45,23 @@ class Registry:
         self._load()
 
     def _load(self) -> None:
-        if self.path.exists():
+        if not self.path.exists():
+            return
+        try:
             self._data = json.loads(self.path.read_text())
+        except json.JSONDecodeError:
+            # A crashed writer can leave a truncated file; quarantine it and
+            # start from an empty registry instead of bricking every command.
+            quarantine = self.path.with_suffix(".json.corrupt")
+            self.path.rename(quarantine)
+            self._data = {"runs": []}
+            self._save()
 
     def _save(self) -> None:
-        self.path.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+        # Atomic replace: a writer dying mid-write must never truncate runs.json.
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+        tmp.replace(self.path)
 
     def add_run(self, run: RunRecord | dict[str, Any]) -> None:
         item = run.to_dict() if isinstance(run, RunRecord) else run

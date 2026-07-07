@@ -11,9 +11,86 @@ Use proxy mode when:
 - The SSH/GPU server cannot directly reach the Slurm cluster.
 - You still want normal commands such as `slurmech doctor`, `slurmech run`, `slurmech pack`, `slurmech fetch`, and `slurmech attach`.
 
-## Recommended Setup: VS Code Remote SSH Reverse Tunnel
+## Recommended Setup: Persistent Reverse Tunnel (survives editor disconnect)
 
-VS Code Remote SSH uses your normal OpenSSH configuration. Add a reverse forward to the host entry you use for the SSH/GPU server on your local machine:
+The GPU server (`sura`) cannot reach `xlog1` directly. Something on your **local network** (laptop, NUS desktop) must keep an outbound SSH session to `sura` with a reverse forward. VS Code / Cursor `RemoteForward` works but **dies when you close the editor** — use a detached `autossh` bridge instead.
+
+### Quick start (local machine)
+
+```bash
+# From this repo on your laptop:
+./shaq-workspace/slurmech/scripts/xlog1-bridge-local.sh start
+./shaq-workspace/slurmech/scripts/xlog1-bridge-local.sh status
+```
+
+This appends a `Host sura-xlog1-bridge` entry to `~/.ssh/config` (once) and runs:
+
+```text
+autossh -N  sura-xlog1-bridge
+  └─ RemoteForward 127.0.0.1:2222 xlog1:22
+```
+
+On `sura`, verify anytime:
+
+```bash
+./shaq-workspace/slurmech/scripts/xlog1-bridge-check.sh
+slurmech doctor
+```
+
+**Important:** Remove `RemoteForward 2222 xlog1:22` from your VS Code/Cursor SSH host entry. Only one process can bind `sura:2222`; the standalone bridge and the editor fight for the same port.
+
+### Auto-start on login
+
+#### macOS (launchd)
+
+macOS has no `systemctl`. After running `xlog1-bridge-local.sh start` once (so `~/.ssh/config` has the host block):
+
+```bash
+brew install autossh   # if needed
+./shaq-workspace/slurmech/scripts/xlog1-bridge-local.sh install-launchd
+./shaq-workspace/slurmech/scripts/xlog1-bridge-local.sh status
+```
+
+To remove auto-start:
+
+```bash
+./shaq-workspace/slurmech/scripts/xlog1-bridge-local.sh uninstall-launchd
+```
+
+Check logs: `~/.cache/xlog1-bridge/autossh.log`
+
+**If you see `Bootstrap failed: 125`:** run `install-launchd` from **Terminal.app on your Mac** while logged in locally — not over SSH. SSH sessions have no `gui/` launchd domain. The script now falls back to the `user/` domain automatically when needed.
+
+If you only need the bridge while your laptop is awake (not necessarily after reboot), `./xlog1-bridge-local.sh start` is enough — `autossh -f` already survives closing the terminal.
+
+#### Linux (systemd user service)
+
+After running `xlog1-bridge-local.sh start` once (so `~/.ssh/config` has the host block):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp shaq-workspace/slurmech/scripts/xlog1-bridge-local.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now xlog1-bridge-local.service
+```
+
+### Manual one-liner (no script)
+
+```bash
+autossh -M 0 -f -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -R 127.0.0.1:2222:xlog1:22 \
+  yigit@sura.ddns.comp.nus.edu.sg
+```
+
+### Why this cannot live only on the GPU server
+
+`sura` has no route to `xlog1` (private NUS network). The tunnel must originate from a machine that can reach both endpoints. A persistent bridge is always an **outbound SSH client on the local side**, not a daemon on `sura`.
+
+## Alternative: VS Code Remote SSH Reverse Tunnel (session-bound)
+
+VS Code Remote SSH can also carry the reverse forward, but the tunnel **only lasts while that SSH session is alive**:
 
 ```sshconfig
 Host gpu-server
@@ -24,7 +101,7 @@ Host gpu-server
   ServerAliveInterval 30
 ```
 
-Then connect to `gpu-server` from VS Code as usual. While that VS Code SSH connection is alive, the remote GPU server exposes:
+While connected, the remote GPU server exposes:
 
 ```text
 127.0.0.1:2222 -> xlog1:22
@@ -88,7 +165,7 @@ All higher-level behavior uses the same connection object, so SFTP sync, stdio a
 
 If `slurmech doctor` cannot connect:
 
-1. Confirm the VS Code SSH session is still connected.
+1. Confirm the persistent bridge is running on your laptop (`xlog1-bridge-local.sh status`) or the VS Code SSH session is still connected.
 2. On the GPU server, test the tunnel:
 
    ```bash
@@ -106,8 +183,14 @@ When running inside the GPU server:
 - Do not change `slurmech` commands. Use the same CLI.
 - Check `.env` or `~/.slurmech/workspaces/<profile>/credentials.env` for `REMOTE_PROXY_HOST` / `REMOTE_PROXY_PORT`.
 - Use `slurmech doctor` before submitting jobs.
-- If the tunnel is missing, ask the local user to reconnect VS Code Remote SSH or run:
+- If the tunnel is missing, start the persistent bridge on the local machine:
 
   ```bash
-  ssh -N -R 2222:xlog1:22 gpu-server
+  ./shaq-workspace/slurmech/scripts/xlog1-bridge-local.sh start
+  ```
+
+  Or reconnect VS Code Remote SSH (session-bound fallback):
+
+  ```bash
+  ssh -N -R 2222:xlog1:22 yigit@sura.ddns.comp.nus.edu.sg
   ```

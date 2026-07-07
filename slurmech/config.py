@@ -27,6 +27,7 @@ class SlurmConfig:
     gres: str | None = None
     mem: str | None = None
     cpus_per_gpu: int | None = None
+    nodes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ def load_workspace_config(start: Path | None = None, profile: str | None = None)
             gres=slurm_raw.get("gres"),
             mem=slurm_raw.get("mem"),
             cpus_per_gpu=slurm_raw.get("cpus_per_gpu"),
+            nodes=slurm_raw.get("nodes"),
         ),
         env=EnvConfig(
             mode=env_raw.get("mode", "uv"),
