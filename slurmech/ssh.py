@@ -95,6 +95,16 @@ class SSHConnection:
         err = stderr.read().decode("utf-8", "ignore")
         return stdout.channel.recv_exit_status(), out, err
 
+    def bash_bytes(self, command: str) -> tuple[int, bytes, str]:
+        """Run a command returning raw stdout bytes (for binary streams like tar)."""
+        if not self._client:
+            raise RuntimeError("SSHConnection is not connected")
+        cmd = f"bash -lc {shlex.quote(command)}"
+        _, stdout, stderr = self._client.exec_command(cmd)
+        out = stdout.read()
+        err = stderr.read().decode("utf-8", "ignore")
+        return stdout.channel.recv_exit_status(), out, err
+
     def stream_tail(self, remote_file: str, from_start: bool = False, lines: int = 100) -> Iterator[str]:
         if not self._client:
             raise RuntimeError("SSHConnection is not connected")

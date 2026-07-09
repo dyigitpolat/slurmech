@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import io
+import json
 import shlex
 import sys
+import tarfile
 from dataclasses import replace
 from pathlib import Path
 
 import typer
 
 from slurmech.config import SlurmConfig, load_workspace_config
-from slurmech.credentials import Credentials, load_credentials
+from slurmech.credentials import load_credentials
 from slurmech.jobs import RemoteLayout, new_run_id, submit_job, submit_pack_job
-from slurmech.pack import PackSpec, load_pack_file
+from slurmech.pack import load_pack_file
 from slurmech.registry import Registry, RunRecord
 from slurmech.remote import resolve_remote_path, run_state_from_markers, squeue_state
 from slurmech.ssh import SSHConnection
@@ -33,6 +36,27 @@ app = typer.Typer(
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
+
+_ACTIVE_STATES = {"PENDING", "RUNNING", "SUBMITTED"}
+_TERMINAL_HIDDEN_STATES = {"FINISHED", "FAILED", "TIMEOUT", "CANCELLED", "STALE"}
+
+
+def _marker_state(conn, remote_run_dir: str | None, fallback: str | None) -> str | None:
+    """Best-known run state from remote marker files, else the fallback."""
+    if remote_run_dir and conn.exists(remote_run_dir):
+        state = run_state_from_markers(conn, remote_run_dir)
+        if state != "UNKNOWN":
+            return state
+    return fallback
+
+
+def _finalize_streamed_run(conn, registry: Registry, run_id: str, remote_run_dir: str) -> str:
+    """Reconcile a run's final state from markers once its job left squeue."""
+    state = _marker_state(conn, remote_run_dir, fallback="SUBMITTED") or "SUBMITTED"
+    if state in _ACTIVE_STATES:
+        state = "STALE"
+    registry.update_run(run_id=run_id, state=state)
+    return state
 
 
 def _connect(profile: str | None) -> tuple:
@@ -109,7 +133,8 @@ def _submit_remote_command(
         typer.echo(f"Submitted run {run_id} as job {job_id}")
         if not detach:
             stream_stdout_until_done(conn, f"{layout.run_dir(run_id)}/stdout.log", job_id, typer.echo)
-            registry.update_run(run_id=run_id, state="FINISHED")
+            state = _finalize_streamed_run(conn, registry, run_id, layout.run_dir(run_id))
+            typer.echo(f"Run {run_id} ended: {state}")
     finally:
         conn.close()
 
@@ -185,15 +210,16 @@ def _submit_pack(
         )
         if not detach:
             stream_stdout_until_done(conn, f"{layout.run_dir(run_id)}/stdout.log", job_id, typer.echo)
-            registry.update_run(run_id=run_id, state="FINISHED")
+            state = _finalize_streamed_run(conn, registry, run_id, layout.run_dir(run_id))
+            typer.echo(f"Run {run_id} ended: {state}")
     finally:
         conn.close()
 
 
-def _pack_child_summary(conn, run: dict) -> str:
+def _pack_child_counts(conn, run: dict) -> dict | None:
     meta = run.get("meta", {})
     if meta.get("kind") != "pack":
-        return ""
+        return None
     children = meta.get("children", [])
     remote_run_dir = run.get("remote_run_dir")
     completed = 0
@@ -206,7 +232,7 @@ def _pack_child_summary(conn, run: dict) -> str:
                 code = file.read().decode("utf-8", "ignore").strip()
             if code and code != "0":
                 failed += 1
-    return f" children={completed}/{len(children)} failed={failed}"
+    return {"total": len(children), "completed": completed, "failed": failed}
 
 
 @app.command()
@@ -275,35 +301,54 @@ def sync(
 def status(
     profile: str = typer.Option(None, "--profile", "-p"),
     all_runs: bool = typer.Option(False, "--all", help="Include fetched/completed runs"),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit one JSON object per run on stdout, nothing else"
+    ),
 ) -> None:
     """Show run registry and Slurm queue."""
     config, credentials, conn, _ = _connect(profile)
     try:
         registry = Registry(config.profile)
-        typer.echo(f"Profile: {config.profile}")
+        if not as_json:
+            typer.echo(f"Profile: {config.profile}")
         for run in registry.all_runs():
-            remote_run_dir = run.get("remote_run_dir")
-            state = run.get("state")
-            if remote_run_dir and conn.exists(remote_run_dir):
-                marker_state = run_state_from_markers(conn, remote_run_dir)
-                if marker_state != "UNKNOWN":
-                    state = marker_state
-                    registry.update_run(run_id=run.get("run_id"), state=state)
+            state = _marker_state(conn, run.get("remote_run_dir"), fallback=run.get("state"))
+            if state != run.get("state"):
+                registry.update_run(run_id=run.get("run_id"), state=state)
             job_id = run.get("job_id")
-            if state in {"PENDING", "RUNNING", "SUBMITTED"} and job_id:
+            if state in _ACTIVE_STATES and job_id:
                 live_state = squeue_state(conn, str(job_id))
                 if live_state is None:
                     state = "STALE"
                     registry.update_run(run_id=run.get("run_id"), state=state)
-            if not all_runs and state in {"FINISHED", "FAILED", "CANCELLED", "STALE"}:
+            if not all_runs and state in _TERMINAL_HIDDEN_STATES:
                 continue
-            child_summary = _pack_child_summary(conn, run)
+            children = _pack_child_counts(conn, run)
+            if as_json:
+                payload = {
+                    "run_id": run.get("run_id"),
+                    "job_id": run.get("job_id"),
+                    "state": state,
+                    "cmd": run.get("cmd", []),
+                    "created_at": run.get("created_at"),
+                }
+                if children is not None:
+                    payload["children"] = children
+                typer.echo(json.dumps(payload, sort_keys=True))
+                continue
+            child_summary = (
+                f" children={children['completed']}/{children['total']}"
+                f" failed={children['failed']}"
+                if children is not None
+                else ""
+            )
             typer.echo(
                 f"{run.get('run_id')} job={run.get('job_id')} "
                 f"state={state}{child_summary} cmd={' '.join(run.get('cmd', []))}"
             )
-        rc, out, err = conn.bash(f"squeue -u {shlex.quote(credentials.user)}")
-        typer.echo(out if rc == 0 else err)
+        if not as_json:
+            rc, out, err = conn.bash(f"squeue -u {shlex.quote(credentials.user)}")
+            typer.echo(out if rc == 0 else err)
     finally:
         conn.close()
 
@@ -357,9 +402,61 @@ def cancel(run_id: str, profile: str = typer.Option(None, "--profile", "-p")) ->
         conn.close()
 
 
+def _extract_tar_stream(data: bytes, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        try:
+            archive.extractall(dest, filter="data")
+        except TypeError:
+            # Python micro-versions without extraction-filter support.
+            archive.extractall(dest)
+
+
+def _fetch_workspace_paths(
+    conn, workspace: str, patterns: list[str], dest: Path
+) -> tuple[list[str], list[str]]:
+    """Expand each glob in the remote workspace shell; tar-stream all matches to dest.
+
+    Returns (matched_patterns, unmatched_patterns).
+    """
+    matched: list[str] = []
+    unmatched: list[str] = []
+    names: list[str] = []
+    for pattern in patterns:
+        rc, out, _ = conn.bash(
+            f"cd {shlex.quote(workspace)} && compgen -G {shlex.quote(pattern)}"
+        )
+        expanded = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 else []
+        if expanded:
+            matched.append(pattern)
+            names.extend(expanded)
+        else:
+            unmatched.append(pattern)
+    if not names:
+        return matched, unmatched
+    quoted = " ".join(shlex.quote(name) for name in sorted(set(names)))
+    rc, data, err = conn.bash_bytes(f"cd {shlex.quote(workspace)} && tar czf - -- {quoted}")
+    # GNU tar exits 1 for "file changed while reading"; the archive is still usable.
+    if rc not in (0, 1) or not data:
+        raise typer.BadParameter(f"Remote tar failed (rc={rc}): {err.strip()}")
+    if rc == 1:
+        typer.echo(f"Warning: remote tar reported changes while reading: {err.strip()}")
+    _extract_tar_stream(data, dest)
+    return matched, unmatched
+
+
 @app.command()
-def fetch(run_id: str, profile: str = typer.Option(None, "--profile", "-p")) -> None:
-    """Fetch basic run artifacts."""
+def fetch(
+    run_id: str,
+    profile: str = typer.Option(None, "--profile", "-p"),
+    path: list[str] = typer.Option(
+        None,
+        "--path",
+        help="Workspace-relative glob to fetch into artifacts/workspace/ (repeatable; "
+        "expanded by the remote shell)",
+    ),
+) -> None:
+    """Fetch run logs, and optionally workspace files matching --path globs."""
     config, _, conn, layout = _connect(profile)
     try:
         registry = Registry(config.profile)
@@ -378,6 +475,20 @@ def fetch(run_id: str, profile: str = typer.Option(None, "--profile", "-p")) -> 
                 remote_path = f"{remote_run_dir}/{child[key]}"
                 if conn.exists(remote_path):
                     conn.get_file(remote_path, child_dir / Path(child[key]).name)
+        matched: list[str] = []
+        unmatched: list[str] = []
+        if path:
+            workspace = f"{remote_run_dir}/workspace"
+            matched, unmatched = _fetch_workspace_paths(
+                conn, workspace, list(path), local_dir / "workspace"
+            )
+            for pattern in unmatched:
+                typer.echo(f"No remote match for --path {pattern!r}")
+            if matched:
+                typer.echo(
+                    f"Fetched workspace paths into {local_dir / 'workspace'}: "
+                    f"{', '.join(matched)}"
+                )
         state = run_state_from_markers(conn, remote_run_dir)
         registry.update_run(
             run_id=run["run_id"],
@@ -385,6 +496,9 @@ def fetch(run_id: str, profile: str = typer.Option(None, "--profile", "-p")) -> 
             state=state if state != "UNKNOWN" else run.get("state"),
         )
         typer.echo(f"Fetched artifacts to {local_dir}")
+        if path and not matched:
+            typer.echo("None of the requested --path globs matched in the remote workspace.")
+            raise typer.Exit(code=1)
     finally:
         conn.close()
 

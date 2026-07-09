@@ -79,6 +79,43 @@ def test_ssh_connection_uses_tunnel_endpoint(monkeypatch) -> None:
     assert FakeSSHClient.instances[0].closed is True
 
 
+def test_bash_bytes_returns_raw_stdout_bytes(monkeypatch) -> None:
+    FakeSSHClient.instances = []
+    monkeypatch.setattr("slurmech.ssh.paramiko.SSHClient", FakeSSHClient)
+    conn = SSHConnection(host="xlog1", user="yigit").connect()
+
+    payload = bytes(range(256))
+    captured = {}
+
+    class FakeChannel:
+        def recv_exit_status(self) -> int:
+            return 0
+
+    class FakeStdout:
+        channel = FakeChannel()
+
+        def read(self) -> bytes:
+            return payload
+
+    class FakeStderr:
+        def read(self) -> bytes:
+            return b"warning"
+
+    def exec_command(cmd, get_pty=False):
+        captured["cmd"] = cmd
+        return (None, FakeStdout(), FakeStderr())
+
+    conn._client.exec_command = exec_command
+
+    rc, out, err = conn.bash_bytes("cd /ws && tar czf - -- generated")
+
+    assert rc == 0
+    assert out == payload
+    assert err == "warning"
+    assert "tar czf - -- generated" in captured["cmd"]
+    conn.close()
+
+
 def test_ssh_connection_uses_paramiko_proxy_command(monkeypatch) -> None:
     FakeSSHClient.instances = []
     FakeProxyCommand.instances = []

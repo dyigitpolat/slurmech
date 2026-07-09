@@ -44,7 +44,7 @@ def test_render_job_script_uses_hardlink_overlay_and_stdio_logs() -> None:
 
     assert "#SBATCH --partition=gpu" in script
     assert "cp -al \"$BASE\"/. \"$WORKSPACE\"/" in script
-    assert "rsync -a \"$OVERLAY\"/ \"$WORKSPACE\"/" in script
+    assert "cp -a \"$OVERLAY\"/. \"$WORKSPACE\"/" in script
     assert "source /remote/env/bin/activate" in script
     assert "python train.py --epochs 1" in script
     assert "> \"$RUN_DIR/stdout.log\" 2> \"$RUN_DIR/stderr.log\"" in script

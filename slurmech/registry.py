@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 def slurmech_home() -> Path:
@@ -63,10 +65,28 @@ class Registry:
         tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
         tmp.replace(self.path)
 
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Exclusive cross-process lock: reload latest state, mutate, then save.
+
+        The lock lives in a sidecar file because the atomic tmp+replace of
+        runs.json swaps inodes, which would silently invalidate a lock taken
+        on runs.json itself.
+        """
+        lock_path = self.path.with_suffix(".json.lock")
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                self._load()
+                yield
+                self._save()
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def add_run(self, run: RunRecord | dict[str, Any]) -> None:
         item = run.to_dict() if isinstance(run, RunRecord) else run
-        self._data["runs"].append(item)
-        self._save()
+        with self._locked():
+            self._data["runs"].append(item)
 
     def all_runs(self) -> list[dict[str, Any]]:
         return list(self._data.get("runs", []))
@@ -83,8 +103,10 @@ class Registry:
         now = datetime.now(timezone.utc).isoformat()
         if run_id and job_id:
             fields["job_id"] = job_id
-        for run in self._data["runs"]:
-            if (run_id and run.get("run_id") == run_id) or (job_id and run.get("job_id") == job_id):
-                run.update(fields)
-                run["updated_at"] = now
-        self._save()
+        with self._locked():
+            for run in self._data["runs"]:
+                if (run_id and run.get("run_id") == run_id) or (
+                    job_id and run.get("job_id") == job_id
+                ):
+                    run.update(fields)
+                    run["updated_at"] = now

@@ -23,8 +23,20 @@ def test_rewrite_bare_command_preserves_named_subcommands() -> None:
     assert _rewrite_bare_command(["init", "--force"]) == ["init", "--force"]
 
 
-def test_rewrite_bare_command_to_run_subcommand() -> None:
-    assert _rewrite_bare_command(["--time", "00:05:00", "python", "-c", "print(1)"]) == [
+def test_rewrite_bare_command_rejects_unknown_bare_tokens() -> None:
+    # Typos must never silently become remote job submissions; an explicit
+    # `run --` is required (this replaced the old implicit-rewrite behavior).
+    with pytest.raises(SystemExit):
+        _rewrite_bare_command(["--time", "00:05:00", "python", "-c", "print(1)"])
+
+
+def test_rewrite_bare_command_passes_explicit_run_through() -> None:
+    argv = ["run", "--time", "00:05:00", "--", "python", "-c", "print(1)"]
+    assert _rewrite_bare_command(argv) == argv
+
+
+def test_rewrite_bare_command_rewrites_after_double_dash() -> None:
+    assert _rewrite_bare_command(["--time", "00:05:00", "--", "python", "-c", "print(1)"]) == [
         "run",
         "--time",
         "00:05:00",

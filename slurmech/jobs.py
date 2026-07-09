@@ -73,6 +73,74 @@ def sbatch_directives(slurm: SlurmConfig) -> list[str]:
     return directives
 
 
+# TERMs a whole process group, escalating to KILL after a short grace, so
+# lingering descendants of the user command never hold the Slurm allocation.
+_KILL_GROUP_FN = """kill_group() {
+  local pgid="$1"
+  if [ -z "$pgid" ]; then
+    return 0
+  fi
+  if ! kill -0 -- "-$pgid" 2>/dev/null; then
+    return 0
+  fi
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  local waited=0
+  while [ "$waited" -lt 5 ]; do
+    if ! kill -0 -- "-$pgid" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+  return 0
+}"""
+
+# Trap-driven safety net: idempotent with the normal-path marker writes, and
+# `.timeout` on TERM because Slurm sends SIGTERM at the time limit.
+_TRAP_FNS_TEMPLATE = """finalize() {{
+  local marker="$1"
+  local code="$2"
+  {cleanup}
+  if [ ! -f "$RUN_DIR/exitcode" ]; then
+    echo "$code" > "$RUN_DIR/exitcode"
+  fi
+  if [ ! -f "$RUN_DIR/.finished" ] && [ ! -f "$RUN_DIR/.failed" ] && [ ! -f "$RUN_DIR/.timeout" ]; then
+    touch "$RUN_DIR/$marker"
+  fi
+  rm -f "$RUN_DIR/.running"
+  return 0
+}}
+
+on_term() {{
+  trap - EXIT
+  finalize .timeout 143
+  exit 143
+}}
+
+on_int() {{
+  trap - EXIT
+  finalize .failed 130
+  exit 130
+}}
+
+on_exit() {{
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    finalize .finished "$code"
+  else
+    finalize .failed "$code"
+  fi
+}}
+
+trap on_term TERM
+trap on_int INT
+trap on_exit EXIT"""
+
+_SINGLE_TRAP_FNS = _TRAP_FNS_TEMPLATE.format(cleanup='kill_group "$CMD_PID"')
+_PACK_TRAP_FNS = _TRAP_FNS_TEMPLATE.format(cleanup="kill_active")
+
+
 def render_job_script(
     run_id: str,
     cmd: list[str],
@@ -102,6 +170,12 @@ BASE={shlex.quote(layout.base)}
 OVERLAY={shlex.quote(overlay)}
 WORKSPACE={shlex.quote(workspace)}
 
+CMD_PID=""
+
+{_KILL_GROUP_FN}
+
+{_SINGLE_TRAP_FNS}
+
 touch "$RUN_DIR/.running"
 rm -f "$RUN_DIR/.pending"
 
@@ -115,9 +189,13 @@ cd "$WORKSPACE"
 {activate}
 
 set +e
-({command}) > "$RUN_DIR/stdout.log" 2> "$RUN_DIR/stderr.log"
+setsid bash -c {shlex.quote(command)} > "$RUN_DIR/stdout.log" 2> "$RUN_DIR/stderr.log" &
+CMD_PID=$!
+wait "$CMD_PID"
 exit_code=$?
 set -e
+
+kill_group "$CMD_PID"
 
 echo "$exit_code" > "$RUN_DIR/exitcode"
 if [ "$exit_code" -eq 0 ]; then
@@ -178,6 +256,55 @@ KILL_ON_FAILURE={kill_on_failure}
 
 exec > "$RUN_DIR/stdout.log" 2> "$RUN_DIR/stderr.log"
 
+declare -a ACTIVE_PIDS
+declare -a ACTIVE_NAMES
+overall_exit=0
+
+{_KILL_GROUP_FN}
+
+kill_active() {{
+  local pgids=""
+  local name
+  for name in "${{ACTIVE_NAMES[@]:-}}"; do
+    if [ -z "$name" ]; then
+      continue
+    fi
+    if [ -f "$RUN_DIR/children/$name/pgid" ]; then
+      pgids="$pgids $(cat "$RUN_DIR/children/$name/pgid")"
+    fi
+  done
+  local pgid
+  for pgid in $pgids; do
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+  done
+  local waited=0
+  while [ "$waited" -lt 5 ]; do
+    local alive=0
+    for pgid in $pgids; do
+      if kill -0 -- "-$pgid" 2>/dev/null; then
+        alive=1
+      fi
+    done
+    if [ "$alive" -eq 0 ]; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  for pgid in $pgids; do
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+  done
+  local pid
+  for pid in "${{ACTIVE_PIDS[@]:-}}"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  return 0
+}}
+
+{_PACK_TRAP_FNS}
+
 touch "$RUN_DIR/.running"
 rm -f "$RUN_DIR/.pending"
 
@@ -194,34 +321,24 @@ declare -a JOB_NAMES
 declare -a JOB_CMDS
 {declarations}
 
-declare -a ACTIVE_PIDS
-declare -a ACTIVE_NAMES
-overall_exit=0
-
 run_child() {{
   local name="$1"
   local command="$2"
   local child_dir="$RUN_DIR/children/$name"
   mkdir -p "$child_dir"
   echo "starting $name"
+  cd "$WORKSPACE"
   set +e
-  (
-    cd "$WORKSPACE"
-    bash -lc "$command"
-  ) > "$child_dir/stdout.log" 2> "$child_dir/stderr.log"
+  setsid bash -lc "$command" > "$child_dir/stdout.log" 2> "$child_dir/stderr.log" &
+  local child_pid=$!
+  echo "$child_pid" > "$child_dir/pgid"
+  wait "$child_pid"
   local exit_code=$?
+  kill_group "$child_pid"
   set -e
   echo "$exit_code" > "$child_dir/exitcode"
   echo "finished $name exit_code=$exit_code"
   return "$exit_code"
-}}
-
-kill_active() {{
-  for pid in "${{ACTIVE_PIDS[@]:-}}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
 }}
 
 wait_one() {{

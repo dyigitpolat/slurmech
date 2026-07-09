@@ -46,17 +46,33 @@ Credentials can also come from the project `.env` (same keys as today: `REMOTE_U
 
 If you run `slurmech` from an SSH/GPU server that cannot directly reach the Slurm cluster, configure a proxy or reverse tunnel. See [docs/PROXY.md](docs/PROXY.md).
 
-## Commands (planned)
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `slurmech <cmd...>` | Sync workspace, submit job, stream stdio |
+| `slurmech run -- <cmd...>` | Sync workspace, submit job, stream stdio |
 | `slurmech init` | First-time remote setup (venv/uv, push files) |
 | `slurmech sync` | Push diff to remote base, update manifest |
-| `slurmech status` | List runs + Slurm queue |
+| `slurmech status [--all] [--json]` | List runs + Slurm queue; `--json` emits one JSON object per run on stdout (nothing else) |
 | `slurmech attach <run>` | Re-attach to a running job's output |
-| `slurmech fetch <run>` | Pull artifacts |
+| `slurmech fetch <run> [--path GLOB]...` | Pull logs; each `--path` is a workspace-relative glob (expanded remotely) extracted into `artifacts/workspace/` |
 | `slurmech cancel <run>` | scancel + update registry |
+| `slurmech pack <file.yaml>` | Run multiple child commands inside one allocation |
+| `slurmech grid <file.yaml>` | Submit each command in a YAML `commands:` list |
+| `slurmech doctor` | Check SSH, Slurm, workspace, and env config |
+
+Run states are reconciled from remote marker files (`.pending`, `.running`,
+`.finished`, `.failed`, `.timeout`, `.cancelled`); Slurm's SIGTERM at the time
+limit is recorded as `TIMEOUT`, and the job script kills the command's whole
+process group on exit so lingering descendants never hold the allocation.
+
+```bash
+# scriptable campaign polling
+slurmech status --all --json | jq -r 'select(.state=="FINISHED") | .run_id'
+
+# pull results out of the run workspace
+slurmech fetch <run_id> --path 'generated/*_phased_deployment_run/_GUI_STATE'
+```
 
 ## License
 

@@ -42,8 +42,13 @@ def remote_exists(conn: SSHConnection, path: str) -> bool:
 
 
 def run_state_from_markers(conn: SSHConnection, run_dir: str) -> str:
+    # Precedence: explicit user cancel > TERM-at-time-limit > failure > success.
     if remote_exists(conn, posixpath.join(run_dir, ".cancelled")):
         return "CANCELLED"
+    if remote_exists(conn, posixpath.join(run_dir, ".timeout")):
+        return "TIMEOUT"
+    if remote_exists(conn, posixpath.join(run_dir, ".failed")):
+        return "FAILED"
     if remote_exists(conn, posixpath.join(run_dir, ".finished")):
         return "FINISHED"
     if remote_exists(conn, posixpath.join(run_dir, ".running")):
