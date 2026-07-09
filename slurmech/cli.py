@@ -7,6 +7,8 @@ import json
 import shlex
 import sys
 import tarfile
+import tempfile
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -412,22 +414,42 @@ def _extract_tar_stream(data: bytes, dest: Path) -> None:
             archive.extractall(dest)
 
 
+_STDOUT_SENTINEL_BEGIN = "__SLURMECH_STDOUT_BEGIN__"
+_STDOUT_SENTINEL_END = "__SLURMECH_STDOUT_END__"
+
+
+def _remote_lines(conn, command: str) -> tuple[int, list[str]]:
+    """Remote command stdout lines, immune to shell-rc noise (e.g. a .bashrc echo)."""
+    rc, out, _ = conn.bash(
+        f"echo {_STDOUT_SENTINEL_BEGIN}; {command}; rc=$?; "
+        f"echo {_STDOUT_SENTINEL_END}; exit $rc"
+    )
+    lines = out.splitlines()
+    try:
+        begin = lines.index(_STDOUT_SENTINEL_BEGIN)
+        end = lines.index(_STDOUT_SENTINEL_END, begin + 1)
+    except ValueError:
+        return rc, []
+    return rc, [line.strip() for line in lines[begin + 1 : end] if line.strip()]
+
+
 def _fetch_workspace_paths(
     conn, workspace: str, patterns: list[str], dest: Path
 ) -> tuple[list[str], list[str]]:
-    """Expand each glob in the remote workspace shell; tar-stream all matches to dest.
+    """Expand each glob in the remote workspace shell; tar all matches to dest.
 
+    The archive travels via a remote temp file + SFTP, never a shell stdout
+    stream, so shell-rc noise cannot corrupt the bytes.
     Returns (matched_patterns, unmatched_patterns).
     """
     matched: list[str] = []
     unmatched: list[str] = []
     names: list[str] = []
     for pattern in patterns:
-        rc, out, _ = conn.bash(
-            f"cd {shlex.quote(workspace)} && compgen -G {shlex.quote(pattern)}"
+        rc, expanded = _remote_lines(
+            conn, f"cd {shlex.quote(workspace)} && compgen -G {shlex.quote(pattern)}"
         )
-        expanded = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 else []
-        if expanded:
+        if rc == 0 and expanded:
             matched.append(pattern)
             names.extend(expanded)
         else:
@@ -435,12 +457,22 @@ def _fetch_workspace_paths(
     if not names:
         return matched, unmatched
     quoted = " ".join(shlex.quote(name) for name in sorted(set(names)))
-    rc, data, err = conn.bash_bytes(f"cd {shlex.quote(workspace)} && tar czf - -- {quoted}")
+    remote_tmp = f"/tmp/slurmech_fetch_{uuid.uuid4().hex}.tgz"
+    rc, _, err = conn.bash(
+        f"cd {shlex.quote(workspace)} && tar czf {shlex.quote(remote_tmp)} -- {quoted}"
+    )
     # GNU tar exits 1 for "file changed while reading"; the archive is still usable.
-    if rc not in (0, 1) or not data:
+    if rc not in (0, 1):
+        conn.bash(f"rm -f {shlex.quote(remote_tmp)}")
         raise typer.BadParameter(f"Remote tar failed (rc={rc}): {err.strip()}")
     if rc == 1:
         typer.echo(f"Warning: remote tar reported changes while reading: {err.strip()}")
+    with tempfile.NamedTemporaryFile(suffix=".tgz") as local_tmp:
+        conn.get_file(remote_tmp, local_tmp.name)
+        conn.bash(f"rm -f {shlex.quote(remote_tmp)}")
+        data = Path(local_tmp.name).read_bytes()
+    if not data:
+        raise typer.BadParameter("Remote tar produced an empty archive")
     _extract_tar_stream(data, dest)
     return matched, unmatched
 

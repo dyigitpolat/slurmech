@@ -220,6 +220,15 @@ def _seed_fetch_run() -> None:
     )
 
 
+
+
+def _noisy_sentinel_output(lines: list[str]) -> str:
+    """Remote stdout as produced under a .bashrc that echoes noise."""
+    return "\n".join(
+        ["hello", "__SLURMECH_STDOUT_BEGIN__", *lines, "__SLURMECH_STDOUT_END__", ""]
+    )
+
+
 def test_fetch_path_extracts_matched_globs_into_workspace_artifacts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home: Path
 ) -> None:
@@ -230,19 +239,26 @@ def test_fetch_path_extracts_matched_globs_into_workspace_artifacts(
     workspace = f"{_run_dir('run1')}/workspace"
     pattern = "generated/*_phased_deployment_run/_GUI_STATE"
 
+    conn = FakeConn()
+
     def bash_handler(command: str):
+        # Every remote shell emits .bashrc noise ("hello") before real output.
         if "compgen -G" in command:
             if shlex.quote(pattern) in command:
-                return (0, "generated/foo_phased_deployment_run/_GUI_STATE\n", "")
-            return (1, "", "")
+                return (0, _noisy_sentinel_output(
+                    ["generated/foo_phased_deployment_run/_GUI_STATE"]), "")
+            return (1, _noisy_sentinel_output([]), "")
+        if "tar czf" in command:
+            assert f"cd {shlex.quote(workspace)} && tar czf /tmp/slurmech_fetch_" in command
+            assert shlex.quote("generated/foo_phased_deployment_run/_GUI_STATE") in command
+            remote_tmp = command.split("tar czf ", 1)[1].split(" -- ", 1)[0]
+            conn.files[remote_tmp] = _tar_bytes_of(remote_ws, ["generated"])
+            return (0, "hello\n", "")
+        if command.startswith("rm -f "):
+            return (0, "hello\n", "")
         return None
 
-    def bash_bytes_handler(command: str):
-        assert command.startswith(f"cd {shlex.quote(workspace)} && tar czf - --")
-        assert shlex.quote("generated/foo_phased_deployment_run/_GUI_STATE") in command
-        return (0, _tar_bytes_of(remote_ws, ["generated"]), "")
-
-    conn = FakeConn(bash_handler=bash_handler, bash_bytes_handler=bash_bytes_handler)
+    conn.bash_handler = bash_handler
     _install_fake_connect(monkeypatch, tmp_path, conn)
     _seed_fetch_run()
 
@@ -290,17 +306,22 @@ def test_fetch_path_partial_match_warns_but_succeeds(
     (remote_ws / "results").mkdir(parents=True)
     (remote_ws / "results" / "out.txt").write_text("ok")
 
+    conn = FakeConn()
+
     def bash_handler(command: str):
         if "compgen -G" in command:
             if shlex.quote("results/*") in command:
-                return (0, "results/out.txt\n", "")
-            return (1, "", "")
+                return (0, _noisy_sentinel_output(["results/out.txt"]), "")
+            return (1, _noisy_sentinel_output([]), "")
+        if "tar czf" in command:
+            remote_tmp = command.split("tar czf ", 1)[1].split(" -- ", 1)[0]
+            conn.files[remote_tmp] = _tar_bytes_of(remote_ws, ["results/out.txt"])
+            return (0, "hello\n", "")
+        if command.startswith("rm -f "):
+            return (0, "hello\n", "")
         return None
 
-    def bash_bytes_handler(command: str):
-        return (0, _tar_bytes_of(remote_ws, ["results/out.txt"]), "")
-
-    conn = FakeConn(bash_handler=bash_handler, bash_bytes_handler=bash_bytes_handler)
+    conn.bash_handler = bash_handler
     _install_fake_connect(monkeypatch, tmp_path, conn)
     _seed_fetch_run()
 
