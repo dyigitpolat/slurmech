@@ -125,9 +125,25 @@ def changed_files(current: Manifest, previous: Manifest | None) -> list[Path]:
     return sorted(changed)
 
 
-def upload_files(conn: SSHConnection, root: Path, files: Iterable[Path], remote_root: str) -> None:
+def upload_files(
+    conn: SSHConnection, root: Path, files: Iterable[Path], remote_root: str
+) -> Manifest:
+    """Upload files and return a manifest of the bytes actually shipped.
+
+    Each file is read once; the recorded sha256/size describe the uploaded
+    bytes, so a file mutating concurrently with a long sync can never leave
+    the remote manifest claiming content the remote does not have.
+    """
+    uploaded: Manifest = {}
     for rel_path in files:
-        conn.put_file(root / rel_path, f"{remote_root.rstrip('/')}/{rel_path.as_posix()}")
+        data = (root / rel_path).read_bytes()
+        conn.put_bytes(data, f"{remote_root.rstrip('/')}/{rel_path.as_posix()}")
+        uploaded[rel_path.as_posix()] = FileState(
+            path=rel_path.as_posix(),
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+    return uploaded
 
 
 def read_remote_manifest(conn: SSHConnection, remote_manifest: str) -> Manifest | None:

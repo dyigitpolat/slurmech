@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import posixpath
 import shlex
@@ -197,6 +198,10 @@ class SSHConnection:
     def put_file(self, local_path: str | Path, remote_path: str) -> None:
         self.mkdirs(posixpath.dirname(remote_path))
         self.sftp().put(str(local_path), remote_path)
+
+    def put_bytes(self, data: bytes, remote_path: str) -> None:
+        self.mkdirs(posixpath.dirname(remote_path))
+        self.sftp().putfo(io.BytesIO(data), remote_path)
 
     def get_file(self, remote_path: str, local_path: str | Path) -> None:
         local_path = Path(local_path)

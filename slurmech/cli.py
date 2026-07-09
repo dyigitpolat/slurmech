@@ -251,7 +251,7 @@ def init(
         conn.mkdirs(layout.runs)
         files = select_files(config)
         manifest = build_manifest(config.root, files)
-        upload_files(conn, config.root, files, layout.base)
+        manifest.update(upload_files(conn, config.root, files, layout.base))
         write_remote_manifest(conn, layout.manifest, manifest)
         (config.profile_dir / "workspace.toml").parent.mkdir(parents=True, exist_ok=True)
         (config.profile_dir / "manifest.json").write_text(manifest_to_json(manifest))
@@ -288,7 +288,7 @@ def sync(
             for path in changed:
                 typer.echo(path.as_posix())
             return
-        upload_files(conn, config.root, changed, layout.base)
+        manifest.update(upload_files(conn, config.root, changed, layout.base))
         write_remote_manifest(conn, layout.manifest, manifest)
         config.profile_dir.mkdir(parents=True, exist_ok=True)
         (config.profile_dir / "manifest.json").write_text(manifest_to_json(manifest))
