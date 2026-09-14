@@ -405,13 +405,41 @@ def cancel(run_id: str, profile: str = typer.Option(None, "--profile", "-p")) ->
 
 
 def _extract_tar_stream(data: bytes, dest: Path) -> None:
+    """Safely overlay a fetched archive without mutating local hard links.
+
+    ``tarfile.extractall`` opens an existing regular destination in place.
+    If an earlier fetch preserved remote checkpoint hard links, updating a
+    mutable ``last.pt`` that way also silently rewrites every immutable epoch
+    alias sharing its inode.  Extract into a sibling directory and atomically
+    replace each non-directory entry instead.  The sibling location keeps
+    every rename on the same filesystem.
+    """
+
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-        try:
-            archive.extractall(dest, filter="data")
-        except TypeError:
-            # Python micro-versions without extraction-filter support.
-            archive.extractall(dest)
+    with tempfile.TemporaryDirectory(prefix=".slurmech-fetch-", dir=dest.parent) as temporary:
+        staging = Path(temporary)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            try:
+                archive.extractall(staging, filter="data")
+            except TypeError:
+                # Python micro-versions without extraction-filter support.
+                archive.extractall(staging)
+
+        entries = sorted(
+            staging.rglob("*"),
+            key=lambda path: (not path.is_dir() or path.is_symlink(), len(path.parts)),
+        )
+        for source in entries:
+            target = dest / source.relative_to(staging)
+            if source.is_dir() and not source.is_symlink():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_dir() and not target.is_symlink():
+                raise typer.BadParameter(
+                    f"Fetched file would replace an existing directory: {target}"
+                )
+            source.replace(target)
 
 
 _STDOUT_SENTINEL_BEGIN = "__SLURMECH_STDOUT_BEGIN__"
@@ -457,7 +485,11 @@ def _fetch_workspace_paths(
     if not names:
         return matched, unmatched
     quoted = " ".join(shlex.quote(name) for name in sorted(set(names)))
-    remote_tmp = f"/tmp/slurmech_fetch_{uuid.uuid4().hex}.tgz"
+    # Login-node /tmp commonly has a small per-user quota and cannot hold model
+    # checkpoints. Keep the transient archive in the run workspace, whose
+    # storage contract is already established by Slurmech and which is removed
+    # immediately after SFTP retrieval.
+    remote_tmp = f"{workspace}/.slurmech_fetch_{uuid.uuid4().hex}.tgz"
     rc, _, err = conn.bash(
         f"cd {shlex.quote(workspace)} && tar czf {shlex.quote(remote_tmp)} -- {quoted}"
     )

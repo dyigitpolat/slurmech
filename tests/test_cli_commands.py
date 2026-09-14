@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shlex
 import tarfile
 from pathlib import Path
@@ -13,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fakes import FakeConn
-from slurmech.cli import _finalize_streamed_run, app
+from slurmech.cli import _extract_tar_stream, _finalize_streamed_run, app
 from slurmech.config import WorkspaceConfig
 from slurmech.jobs import RemoteLayout
 from slurmech.registry import Registry, RunRecord
@@ -220,6 +221,29 @@ def _seed_fetch_run() -> None:
     )
 
 
+def test_fetch_overlay_breaks_stale_local_checkpoint_hardlinks(tmp_path: Path) -> None:
+    destination = tmp_path / "artifacts"
+    destination.mkdir()
+    last = destination / "last.pt"
+    epoch3 = destination / "checkpoints" / "epoch_003.pt"
+    epoch3.parent.mkdir()
+    last.write_bytes(b"epoch-3")
+    os.link(last, epoch3)
+    assert last.stat().st_ino == epoch3.stat().st_ino
+
+    remote = tmp_path / "remote"
+    (remote / "checkpoints").mkdir(parents=True)
+    (remote / "last.pt").write_bytes(b"epoch-12")
+    (remote / "checkpoints" / "epoch_003.pt").write_bytes(b"epoch-3")
+    archive = _tar_bytes_of(remote, ["last.pt", "checkpoints"])
+
+    _extract_tar_stream(archive, destination)
+
+    assert last.read_bytes() == b"epoch-12"
+    assert epoch3.read_bytes() == b"epoch-3"
+    assert last.stat().st_ino != epoch3.stat().st_ino
+
+
 
 
 def _noisy_sentinel_output(lines: list[str]) -> str:
@@ -249,7 +273,10 @@ def test_fetch_path_extracts_matched_globs_into_workspace_artifacts(
                     ["generated/foo_phased_deployment_run/_GUI_STATE"]), "")
             return (1, _noisy_sentinel_output([]), "")
         if "tar czf" in command:
-            assert f"cd {shlex.quote(workspace)} && tar czf /tmp/slurmech_fetch_" in command
+            assert (
+                f"cd {shlex.quote(workspace)} && tar czf "
+                f"{workspace}/.slurmech_fetch_"
+            ) in command
             assert shlex.quote("generated/foo_phased_deployment_run/_GUI_STATE") in command
             remote_tmp = command.split("tar czf ", 1)[1].split(" -- ", 1)[0]
             conn.files[remote_tmp] = _tar_bytes_of(remote_ws, ["generated"])

@@ -192,8 +192,18 @@ class SSHConnection:
             current = posixpath.join(current, part) if current else part
             try:
                 self.sftp().mkdir(current)
-            except OSError:
-                pass
+            except OSError as error:
+                # SFTP servers commonly report EEXIST as a generic ``Failure``.
+                # Accept that case only after proving the component is already
+                # a directory.  Suppressing every OSError hid quota, permission,
+                # and directory-limit failures until the subsequent first-file
+                # upload emitted a misleading putfo error.
+                if self.isdir(current):
+                    continue
+                raise OSError(
+                    f"failed to create remote directory component {current!r} "
+                    f"while preparing {path!r}: {error}"
+                ) from error
 
     def put_file(self, local_path: str | Path, remote_path: str) -> None:
         self.mkdirs(posixpath.dirname(remote_path))

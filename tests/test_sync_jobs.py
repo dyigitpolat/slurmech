@@ -77,5 +77,5 @@ def test_render_pack_script_runs_children_concurrently_with_logs() -> None:
     assert "> \"$child_dir/stdout.log\" 2> \"$child_dir/stderr.log\"" in script
     assert "echo \"$exit_code\" > \"$child_dir/exitcode\"" in script
     assert "run_child \"$name\" \"$cmd\" &" in script
-    assert "CUDA_VISIBLE_DEVICES=0 python -c" in script
+    assert "export CUDA_VISIBLE_DEVICES=0; python -c" in script
     assert "cp -al \"$BASE\"/. \"$WORKSPACE\"/" in script

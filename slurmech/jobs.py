@@ -214,7 +214,10 @@ def _pack_jobs_declarations(spec: PackSpec) -> str:
         env_exports = " ".join(
             f"{key}={shlex.quote(value)}" for key, value in sorted(child.env.items())
         )
-        command = f"{env_exports} {child.cmd}".strip()
+        # ``KEY=value command`` scopes variables to only the first simple
+        # command. For ``cd repo && python train.py`` that assignment vanishes
+        # after ``cd``. A child environment applies to the complete chain.
+        command = f"export {env_exports}; {child.cmd}" if env_exports else child.cmd
         lines.append(f"JOB_NAMES[{idx}]={shlex.quote(child.name)}")
         lines.append(f"JOB_CMDS[{idx}]={shlex.quote(command)}")
     return "\n".join(lines)

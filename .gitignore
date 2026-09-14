@@ -8,3 +8,12 @@ dist/
 .ruff_cache/
 .env
 .env.*
+
+# Workload, not tool. grids/ holds hand-written pack specs for one campaign
+# (SHAQ Jul-22), with that campaign's environment variables and absolute cluster
+# paths. No slurmech code reads grids/; the launch record belongs with the
+# campaign, not in a workload-agnostic runner.
+grids/
+
+# Local runner state
+.slurmech/

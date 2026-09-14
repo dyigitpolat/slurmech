@@ -220,6 +220,28 @@ def test_pack_success_writes_child_exitcodes_and_finished(tmp_path: Path) -> Non
     assert "b 0" in status
 
 
+def test_pack_child_environment_persists_after_cd(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    observed = tmp_path / "observed.txt"
+    spec = PackSpec(
+        jobs=[
+            PackChild(
+                name="env",
+                cmd=f"cd {nested} && printf %s \"$SCIENTIFIC_TOKEN\" > {observed}",
+                env={"SCIENTIFIC_TOKEN": "persisted"},
+            )
+        ],
+        parallelism=1,
+    )
+    script_path, _run_dir = _render_pack(tmp_path, spec)
+
+    result = subprocess.run(["bash", str(script_path)], check=False)
+
+    assert result.returncode == 0
+    assert observed.read_text() == "persisted"
+
+
 def test_pack_kill_on_failure_kills_sibling_process_group(tmp_path: Path) -> None:
     flag = tmp_path / "victim.started"
     spec = PackSpec(

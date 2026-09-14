@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from stat import S_IFDIR
+from types import SimpleNamespace
+
+import pytest
+
 from slurmech.ssh import SSHConnection
 
 
@@ -137,3 +142,55 @@ def test_ssh_connection_uses_paramiko_proxy_command(monkeypatch) -> None:
 
     conn.close()
     assert proxy.closed is True
+
+
+class FakeDirectorySFTP:
+    def __init__(self, directories: set[str], failure: str | None = None) -> None:
+        self.directories = set(directories)
+        self.failure = failure
+
+    def mkdir(self, path: str) -> None:
+        if path in self.directories:
+            raise OSError("Failure")
+        if path == self.failure:
+            raise OSError("Disk quota exceeded")
+        self.directories.add(path)
+
+    def stat(self, path: str) -> SimpleNamespace:
+        if path not in self.directories:
+            raise OSError("No such file")
+        return SimpleNamespace(st_mode=S_IFDIR | 0o755)
+
+
+def test_mkdirs_accepts_only_verified_existing_directory_components() -> None:
+    conn = SSHConnection(host="xlog1", user="yigit")
+    fake = FakeDirectorySFTP({"/home", "/home/y", "/home/y/yigit"})
+    conn._sftp = fake  # type: ignore[assignment]
+
+    conn.mkdirs("/home/y/yigit/.slurmech/runs/new-run/overlay")
+
+    assert "/home/y/yigit/.slurmech/runs/new-run/overlay" in fake.directories
+
+
+def test_mkdirs_preserves_actual_failed_component_and_server_error() -> None:
+    conn = SSHConnection(host="xlog1", user="yigit")
+    failed = "/home/y/yigit/.slurmech/runs/new-run"
+    fake = FakeDirectorySFTP(
+        {
+            "/home",
+            "/home/y",
+            "/home/y/yigit",
+            "/home/y/yigit/.slurmech",
+            "/home/y/yigit/.slurmech/runs",
+        },
+        failure=failed,
+    )
+    conn._sftp = fake  # type: ignore[assignment]
+
+    with pytest.raises(OSError) as captured:
+        conn.mkdirs(f"{failed}/overlay/shaq/src")
+
+    message = str(captured.value)
+    assert failed in message
+    assert f"{failed}/overlay/shaq/src" in message
+    assert "Disk quota exceeded" in message
